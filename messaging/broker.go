@@ -475,34 +475,43 @@ func (b *Broker) TopicReader(topicID, index uint64, streaming bool) io.ReadClose
 // SetTopicMaxIndex updates the highest replicated index for a topic.
 // If a higher index is already set on the topic then the call is ignored.
 // This index is only held in memory and is used for topic segment reclamation.
-func (b *Broker) SetTopicMaxIndex(topicID, index uint64) error {
+func (b *Broker) SetTopicMaxIndex(topicID, index uint64, u url.URL) error {
 	_, err := b.Publish(&Message{
 		Type: SetTopicMaxIndexMessageType,
-		Data: marshalTopicIndex(topicID, index),
+		Data: marshalTopicIndex(topicID, index, u),
 	})
 	return err
 }
 
 func (b *Broker) applySetTopicMaxIndex(m *Message) {
-	topicID, index := unmarshalTopicIndex(m.Data)
+	topicID, index, u := unmarshalTopicIndex(m.Data)
 
 	// Set index if it's not already set higher.
 	t := b.topics[topicID]
 	if t != nil && t.index < index {
 		t.index = index
 	}
+	t.indexByURL[u] = index
 }
 
-func marshalTopicIndex(topicID, index uint64) []byte {
-	b := make([]byte, 16)
+func marshalTopicIndex(topicID, index uint64, u url.URL) []byte {
+	s := []byte(u.String())
+	b := make([]byte, 16+2+len(s))
 	binary.BigEndian.PutUint64(b[0:8], topicID)
 	binary.BigEndian.PutUint64(b[8:16], index)
+	binary.BigEndian.PutUint16(b[16:18], uint16(len(s)))
+	copy(s, b[20:])
 	return b
 }
 
-func unmarshalTopicIndex(b []byte) (topicID, index uint64) {
+func unmarshalTopicIndex(b []byte) (topicID, index uint64, u url.URL) {
+	assert(len(b) >= 18, "unmarshal message too short. have %d, expected %d", len(b), 20)
 	topicID = binary.BigEndian.Uint64(b[0:8])
 	index = binary.BigEndian.Uint64(b[8:16])
+	l := binary.BigEndian.Uint16(b[16:18])
+	bu, err := url.Parse(string(b[18 : 18+l]))
+	assert(err == nil, "unmarshal binary error: %s", err)
+	u = *bu
 	return
 }
 
@@ -617,10 +626,13 @@ const DefaultMaxSegmentSize = 10 * 1024 * 1024 // 10MB
 // Topics write their entries to segmented log files which contain a
 // contiguous range of entries.
 type Topic struct {
-	mu    sync.Mutex
-	id    uint64 // unique identifier
-	index uint64 // highest index replicated
-	path  string // on-disk path
+	mu         sync.Mutex
+	id         uint64             // unique identifier
+	index      uint64             // current index
+	path       string             // on-disk path
+	indexByURL map[url.URL]uint64 // current index by topic subscriber url
+
+	// highest index replicated per data url
 
 	file   *os.File // last segment writer
 	opened bool
@@ -632,9 +644,9 @@ type Topic struct {
 // NewTopic returns a new instance of Topic.
 func NewTopic(id uint64, path string) *Topic {
 	return &Topic{
-		id:   id,
-		path: path,
-
+		id:             id,
+		path:           path,
+		indexByURL:     make(map[url.URL]uint64),
 		MaxSegmentSize: DefaultMaxSegmentSize,
 	}
 }
@@ -650,6 +662,10 @@ func (t *Topic) Index() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.index
+}
+
+func (t *Topic) IndexForURL(u url.URL) uint64 {
+	return t.indexByURL[u]
 }
 
 // SegmentPath returns the path to a segment starting with a given log index.

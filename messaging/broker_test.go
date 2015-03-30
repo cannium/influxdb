@@ -124,12 +124,18 @@ func TestBroker_Apply_SetMaxTopicIndex(t *testing.T) {
 	if err := b.Apply(&messaging.Message{
 		Index: 2,
 		Type:  messaging.SetTopicMaxIndexMessageType,
-		Data:  []byte{0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 5}, // topicID=20, index=5
+		Data: []byte{0, 0, 0, 0, 0, 0, 0, 20, 0, 0, 0, 0, 0, 0, 0, 5, // topicID=20, index=5,
+			0, 26, 104, 116, 116, 112, 58, 47, 47, 108, 111, 99, 97, 108, //len=26, url="http://localhost:1234/data"
+			104, 111, 115, 116, 58, 49, 50, 51, 52, 47, 100, 97, 116, 97},
 	}); err != nil {
 		t.Fatalf("apply error: %s", err)
 	}
+	u, _ := url.Parse("http://localhost:1234/data")
 	if topic := b.Topic(20); topic.Index() != 5 {
 		t.Fatalf("unexpected topic index: %d", topic.Index())
+	}
+	if topic := b.Topic(20); topic.IndexForURL(*u) != 5 {
+		t.Fatalf("unexpected topic url index: %d", topic.IndexForURL(*u))
 	}
 }
 
@@ -243,8 +249,12 @@ func TestBroker_SetTopicMaxIndex(t *testing.T) {
 		return 1, nil
 	}
 
+	u, err := url.Parse("http://localhost:1234/data")
+	if err != nil {
+		t.Fatalf("bad url: %s", err)
+	}
 	// Set the highest replicated topic index.
-	if err := b.SetTopicMaxIndex(1, 2); err != nil {
+	if err := b.SetTopicMaxIndex(1, 2, *u); err != nil {
 		t.Fatal(err)
 	}
 }
